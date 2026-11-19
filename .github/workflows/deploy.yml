@@ -1,0 +1,72 @@
+﻿name: PagosYA Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: pagosya-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Definir etiqueta e imagen
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/pagosya-api"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Construir imagen
+        run: |
+          docker build \
+            --build-arg APP_VERSION="$TAG" \
+            -t "$IMAGE:$TAG" \
+            app/
+
+      - name: Ejecutar contenedor para prueba
+        run: |
+          docker run -d --name pagosya-test \
+            -p 8080:8000 \
+            "$IMAGE:$TAG"
+
+      - name: Smoke test
+        run: |
+          for i in {1..10}; do
+            if curl -fsS http://localhost:8080/; then
+              echo "Smoke test exitoso"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Smoke test fallido"
+          docker logs pagosya-test
+          exit 1
+
+      - name: Iniciar sesion en GHCR
+        if: success()
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Publicar imagen
+        if: success()
+        run: |
+          docker push "$IMAGE:$TAG"
+
+      - name: Limpiar contenedor de prueba
+        if: always()
+        run: |
+          docker rm -f pagosya-test || true
